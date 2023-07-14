@@ -8,6 +8,90 @@ import fishspot.psf as fs_psf
 import fishspot.detect as fs_detect
 
 
+def normalize_data_for_plotting(zarr_data):
+    import copy
+    z_normalized = copy.deepcopy(zarr_data.astype(np.float32))
+
+
+    z_normalized[z_normalized<90] = 90
+
+    z_normalized = z_normalized - np.percentile(z_normalized, 5)
+    
+    z_normalized = z_normalized / np.percentile(z_normalized, 95)
+    
+    z_normalized[z_normalized<0] = 0
+    
+    z_normalized[z_normalized>1] = 1
+
+    #swap x and y for plotting
+    z_normalized = np.moveaxis(z_normalized, [0,1,2], [1,0,2])
+
+    return z_normalized
+
+def plot_volume_gif(fix_zarr_data, file_path, name, coords=None):
+    from matplotlib import pyplot as plt
+    import os
+
+    temp_image_folder = os.path.join(file_path,name,'frames')
+    
+    if not os.path.exists(temp_image_folder):
+        os.makedirs(temp_image_folder)
+    
+    # normalize for display
+    f_normalized = normalize_data_for_plotting(fix_zarr_data)
+
+    frame_num = 0
+    frame_filenames = []
+    frame_copies = 1
+    step=1
+    for i in range(0, f_normalized.shape[2] , step):
+        
+
+        # make RGB version
+        a_rgb = np.zeros(f_normalized.shape[:-1] + (3,))
+        a_rgb[..., 0] = f_normalized[..., i] 
+        a_rgb[..., 1] = f_normalized[..., i] 
+        a_rgb[..., 2] = f_normalized[..., i] 
+
+
+        # create figure
+            
+        frame_ratio = a_rgb.shape[1] / a_rgb.shape[0]
+
+        for j in range(0, frame_copies):
+            if frame_copies > 1:
+                frame_filename = temp_image_folder+"/{}_{}.png".format(i, j)
+            else:
+                frame_filename = temp_image_folder+"/{}.png".format(i)
+
+            
+
+            fig = plt.figure(figsize=(8, int(8*frame_ratio)))
+            plt.xlabel("X")
+            plt.ylabel("Y")
+            if coords is not None:
+                plt.imshow(a_rgb, extent=[coords[2].start, coords[2].stop, coords[1].start, coords[1].stop])
+            plt.savefig(frame_filename)
+
+            plt.close(fig)
+            frame_num += 1
+            frame_filenames.append(frame_filename)
+
+
+    # build gif
+    import imageio
+    with imageio.get_writer(file_path+name+'.gif', mode='I') as writer:
+        for filename in frame_filenames:
+            image = imageio.v2.imread(filename)
+            writer.append_data(image)
+            # Remove files
+    # if not config['keep_gif_frames']:
+    #     for filename in set(frame_filenames):
+    #         os.remove(filename)
+    #     os.removedirs(temp_image_folder)
+
+
+
 @cluster
 def distributed_spot_detection(
     array, blocksize,
@@ -24,7 +108,7 @@ def distributed_spot_detection(
 ):
     """
     """
-
+    print("IN DISTRIBUTED BLOB")
     # set white_tophat defaults
     if 'radius' not in white_tophat_args:
         white_tophat_args['radius'] = 4
@@ -78,6 +162,9 @@ def distributed_spot_detection(
 
     # pipeline to run on each block
     def detect_spots_pipeline(coords, psf):
+        import uuid 
+        uuid.uuid4().hex[:6].upper()
+        import os
 
         # load data, background subtract, deconvolve, detect blobs
         block = array[coords]
@@ -86,12 +173,20 @@ def distributed_spot_detection(
             # automated psf estimation with error handling
             for i in range(psf_retries):
                 try:
+                    print("TRYING PSF ESTIMATION")
                     psf = fs_psf.estimate_psf(wth, **psf_estimation_args)
+                    print("GOT PSF")
+                    print(psf)
                 except ValueError:
-                    if 'inlier_threshold' not in psf_estimation_args:
-                        psf_estimation_args['inlier_threshold'] = 0.9
-                    psf_estimation_args['inlier_threshold'] -= 0.1
-                else: break
+                    if psf is None:
+                        uuid_str = uuid.uuid4().hex[:6].upper()
+                        print(np.max(block), np.min(block), np.mean(block), block.shape, coords, os.getpid(),uuid_str, flush=True)
+                        plot_volume_gif(block, os.environ['jobdir'], f'psf_block_{os.getpid()}'+uuid_str, coords)
+                        if 'inlier_threshold' not in psf_estimation_args:
+                            psf_estimation_args['inlier_threshold'] = 0.9
+                        psf_estimation_args['inlier_threshold'] -= 0.1
+                        print("ERROR WITH PSF ESTIMATION", flush=True)
+                    else: break
         decon = fs_filter.rl_decon(wth, psf, **deconvolution_args)
         spots = fs_detect.detect_spots_log(decon, **spot_detection_args)
 
@@ -137,4 +232,3 @@ def distributed_spot_detection(
 
     # return results
     return spots, psf
-
